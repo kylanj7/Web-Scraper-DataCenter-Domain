@@ -1,449 +1,357 @@
 import os
-import re
-import csv
 import time
-import json
-import math
-import queue
-import hashlib
-import logging
-import pathlib
-import urllib.parse
-import urllib.robotparser as robotparser
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-from collections import defaultdict
-
 import requests
-from PyPDF2 import PdfReader
+from urllib.parse import quote_plus, urlparse, unquote
+from bs4 import BeautifulSoup
+import random
+import re
+import importlib.util
+import sys
 
-# ------------ Config ------------
-USER_AGENT = "PublicPDFScraper/1.0 (+compatible; contact=webmaster@example.com)"
-OUT_DIR = "public_pdfs"
-MANIFEST_CSV = "manifest.csv"
-LOG_FILE = "scrape.log"
+# Import the SearchTerms module
+spec = importlib.util.spec_from_file_location("SearchTerms", "SearchTerms.py")
+search_terms_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(search_terms_module)
 
-# Global rate limit (requests per minute)
-REQUESTS_PER_MIN = 10
-SECONDS_PER_REQUEST = max(6.0, 60.0 / max(1, REQUESTS_PER_MIN))
+# Get the search terms based on available attributes
+if hasattr(search_terms_module, 'get_advanced_categories'):
+    categories = search_terms_module.get_advanced_categories()
+    print(f"Successfully imported search terms using get_advanced_categories()")
+elif hasattr(search_terms_module, 'SEARCH_TERMS'):
+    categories = search_terms_module.SEARCH_TERMS
+    print(f"Successfully imported search terms using SEARCH_TERMS")
+else:
+    print("Could not find search terms in SearchTerms.py")
+    sys.exit(1)
 
-# Per-domain politeness delay
-PER_DOMAIN_DELAY = 10.0  # seconds between hits to the same domain
+# Print summary of categories and terms
+print(f"Found {len(categories)} categories with a total of {sum(len(terms) for terms in categories.values())} search terms")
+for category, terms in categories.items():
+    print(f"  - {category}: {len(terms)} terms")
 
-# Bing Web Search API (recommended) – set env var BING_API_KEY
-BING_ENDPOINT = "https://api.bing.microsoft.com/v7.0/search"
+# Setup base directory in the project folder
+base_path = os.path.join(os.getcwd(), 'Google PDF Downloader')
+if not os.path.exists(base_path):
+    os.makedirs(base_path)
 
-# Conservative license allow/deny patterns
-PERMISSIVE_LICENSE_PATTERNS = re.compile(
-    r"(creative\s+commons|cc[-\s]?by|cc[-\s]?by[-\s]?sa|public\s+domain|"
-    r"open\s+government\s+licen[cs]e|u\.?s\.?\s+government\s+work|17\s*usc\s*105)",
-    re.IGNORECASE,
-)
-RESTRICTIVE_PATTERNS = re.compile(
-    r"(all\s+rights\s+reserved|no\s+reproduction|no\s+redistribution|©|copyright\s+\d{4})",
-    re.IGNORECASE,
-)
+# List of user agents to rotate
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.59'
+]
 
-# Optional safe allowlist behavior: treat these TLDs as "likely public" unless headers prohibit
-LIKELY_PUBLIC_TLDS = (".gov", ".mil", ".eu", ".int")
-
-# ------------ Setup ------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler()
-    ],
-)
-
-os.makedirs(OUT_DIR, exist_ok=True)
-
-# ------------ Utilities ------------
-def domain_of(url: str) -> str:
-    return urllib.parse.urlparse(url).netloc.lower()
-
-def tld_is_likely_public(netloc: str) -> bool:
-    return any(netloc.endswith(tld) for tld in LIKELY_PUBLIC_TLDS)
-
-def sha256_of_bytes(data: bytes) -> str:
-    h = hashlib.sha256()
-    h.update(data)
-    return h.hexdigest()
-
-def sanitize_filename(name: str) -> str:
-    name = re.sub(r"[^\w\-.]+", "_", name)
-    return name[:150]
-
-# ------------ Robots handling ------------
-class RobotsCache:
-    def __init__(self, user_agent: str):
-        self.user_agent = user_agent
-        self.cache: Dict[str, robotparser.RobotFileParser] = {}
-
-    def can_fetch(self, url: str) -> bool:
-        parsed = urllib.parse.urlparse(url)
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        if base not in self.cache:
-            rp = robotparser.RobotFileParser()
-            robots_url = urllib.parse.urljoin(base, "/robots.txt")
-            try:
-                rp.set_url(robots_url)
-                rp.read()
-                self.cache[base] = rp
-            except Exception as e:
-                logging.warning(f"robots.txt fetch failed for {base}: {e}")
-                # Fail closed: if robots can't be read, be conservative and block
-                return False
-        rp = self.cache[base]
-        return rp.can_fetch(self.user_agent, url)
-
-# ------------ Rate limiting ------------
-class RateLimiter:
-    def __init__(self, min_interval: float):
-        self.min_interval = float(min_interval)
-        self.last_time = 0.0
-
-    def wait(self):
-        now = time.time()
-        delta = now - self.last_time
-        if delta < self.min_interval:
-            time.sleep(self.min_interval - delta)
-        self.last_time = time.time()
-
-class PerDomainLimiter:
-    def __init__(self, delay: float):
-        self.delay = float(delay)
-        self.last_hit: Dict[str, float] = defaultdict(lambda: 0.0)
-
-    def wait(self, netloc: str):
-        now = time.time()
-        delta = now - self.last_hit[netloc]
-        if delta < self.delay:
-            time.sleep(self.delay - delta)
-        self.last_hit[netloc] = time.time()
-
-# ------------ HTTP ------------
-session = requests.Session()
-session.headers.update({"User-Agent": USER_AGENT, "Accept": "*/*"})
-
-global_rl = RateLimiter(SECONDS_PER_REQUEST)
-domain_rl = PerDomainLimiter(PER_DOMAIN_DELAY)
-robots_cache = RobotsCache(USER_AGENT)
-
-def safe_get(url: str, stream: bool = False, allow_redirects: bool = True) -> Optional[requests.Response]:
-    if not robots_cache.can_fetch(url):
-        logging.info(f"Robots disallow: {url}")
-        return None
-    netloc = domain_of(url)
-    domain_rl.wait(netloc)
-    global_rl.wait()
-    try:
-        resp = session.get(url, timeout=30, stream=stream, allow_redirects=allow_redirects)
-        return resp
-    except Exception as e:
-        logging.warning(f"GET failed {url}: {e}")
-        return None
-
-# ------------ Licensing checks ------------
-def headers_forbid_use(resp: requests.Response) -> bool:
-    # Respect X-Robots-Tag = noindex/noarchive/noai etc.
-    xr = resp.headers.get("X-Robots-Tag", "") + "," + resp.headers.get("x-robots-tag", "")
-    if xr:
-        tags = xr.lower()
-        if any(tag in tags for tag in ["noindex", "noarchive", "noai", "nofollow", "none"]):
-            return True
-    # Also respect standard robots meta via header (rare for PDFs, but be cautious)
-    return False
-
-def text_looks_permissive(text: str) -> bool:
-    return bool(PERMISSIVE_LICENSE_PATTERNS.search(text))
-
-def text_looks_restrictive(text: str) -> bool:
-    return bool(RESTRICTIVE_PATTERNS.search(text))
-
-def pdf_text_preview(pdf_bytes: bytes, max_pages: int = 2) -> str:
-    # Extract minimal text to check licensing cues
-    try:
-        reader = PdfReader(io_bytes := pdf_bytes)
-    except Exception:
-        # Fallback: write to temp for PyPDF2
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-            tmp.write(pdf_bytes)
-            tmp.flush()
-            reader = PdfReader(tmp.name)
-    pages = []
-    for i, page in enumerate(reader.pages[:max_pages]):
-        try:
-            pages.append(page.extract_text() or "")
-        except Exception:
-            pages.append("")
-    return "\n".join(pages)
-
-def is_public_enough(url: str, resp: requests.Response, pdf_bytes: bytes, netloc: str) -> Tuple[bool, str]:
-    """
-    Very conservative policy:
-    - Reject if headers include restrictive X-Robots-Tag (noindex/noarchive/noai)
-    - Prefer allow if page text mentions permissive license (CC/Public Domain/etc.)
-    - If domain is likely public (.gov/.mil/.eu/.int) and text is NOT explicitly restrictive, allow
-    - Otherwise, reject if we see restrictive language (©/All rights reserved)
-    - If no signal either way, default to REJECT (conservative)
-    """
-    if headers_forbid_use(resp):
-        return (False, "Rejected: X-Robots-Tag forbids indexing/AI")
-
-    preview = pdf_text_preview(pdf_bytes, max_pages=2)
-    if text_looks_permissive(preview):
-        return (True, "Accepted: permissive license detected in text")
-
-    if tld_is_likely_public(netloc):
-        if text_looks_restrictive(preview):
-            return (False, "Rejected: restrictive language on likely-public domain")
-        return (True, "Accepted: likely public TLD and no restrictive language found")
-
-    # If explicit restrictive phrasing is present, reject
-    if text_looks_restrictive(preview):
-        return (False, "Rejected: restrictive licensing language found")
-
-    return (False, "Rejected: no permissive license signal (conservative default)")
-
-# ------------ Discovery ------------
-def discover_via_bing(query: str) -> List[str]:
-    key = os.environ.get("BING_API_KEY", "").strip()
-    if not key:
-        logging.warning("BING_API_KEY not set; skipping Bing discovery for query: %s", query)
-        return []
-    params = {
-        "q": f'filetype:pdf "{query}"',
-        "count": 30,
-        "textDecorations": False,
-        "textFormat": "Raw",
-        "responseFilter": "Webpages",
-        "mkt": "en-US",
-        "safeSearch": "Moderate",
+# List of search engines to try
+SEARCH_ENGINES = [
+    {
+        'name': 'Google',
+        'url': 'https://www.google.com/search?q={}&num=30',
+        'selector': 'a[href]',
+        'link_extractor': lambda link: link.get('href')
+    },
+    {
+        'name': 'Bing',
+        'url': 'https://www.bing.com/search?q={}&count=30',
+        'selector': 'a[href]',
+        'link_extractor': lambda link: link.get('href')
+    },
+    {
+        'name': 'DuckDuckGo',
+        'url': 'https://html.duckduckgo.com/html/?q={}',
+        'selector': 'a.result__a',
+        'link_extractor': lambda link: link.get('href')
     }
-    headers = {"Ocp-Apim-Subscription-Key": key}
-    global_rl.wait()
-    try:
-        r = session.get(BING_ENDPOINT, params=params, headers=headers, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        logging.warning(f"Bing search failed for '{query}': {e}")
-        return []
+]
 
-    urls = []
-    for w in (data.get("webPages") or {}).get("value", []):
-        url = w.get("url", "")
-        if url.lower().endswith(".pdf"):
-            urls.append(url)
-    return urls
+def get_random_headers():
+    """Generate random headers for requests to avoid detection."""
+    return {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0'
+    }
 
-def crawl_for_pdfs(seed_url: str) -> List[str]:
-    # Fetch HTML and extract direct .pdf links on the page
-    resp = safe_get(seed_url, stream=False)
-    if not resp or not (200 <= resp.status_code < 300):
-        return []
-    ctype = resp.headers.get("Content-Type", "").lower()
-    if "text/html" not in ctype:
-        return []
-    try:
-        html = resp.text
-    except Exception:
-        return []
-    pdf_links = set()
-    for m in re.finditer(r'href=["\']([^"\']+\.pdf)(\?[^"\']*)?["\']', html, flags=re.IGNORECASE):
-        href = m.group(0)  # full match
-        url = m.group(1)
-        full = urllib.parse.urljoin(resp.url, url)
-        pdf_links.add(full)
-    return list(pdf_links)
+def extract_real_url(redirect_url):
+    """Extract the actual URL from search engine redirect URLs."""
+    # Google redirect format
+    if 'google.com' in redirect_url and '/url?q=' in redirect_url:
+        match = re.search(r'/url\?q=([^&]+)', redirect_url)
+        if match:
+            return unquote(match.group(1))
+    
+    # Bing redirect format
+    elif 'bing.com' in redirect_url and '/ck?' in redirect_url:
+        match = re.search(r'u=([^&]+)', redirect_url)
+        if match:
+            return unquote(match.group(1))
+    
+    # DuckDuckGo redirect format
+    elif 'duckduckgo.com' in redirect_url and '/l/?' in redirect_url:
+        match = re.search(r'uddg=([^&]+)', redirect_url)
+        if match:
+            return unquote(match.group(1))
+    
+    # Return the original URL if we can't extract a redirect
+    return redirect_url
 
-# ------------ Download & Save ------------
-def save_pdf(url: str, content: bytes) -> str:
-    # Name by hash + slug of file
-    hash_prefix = sha256_of_bytes(content)[:12]
-    slug = sanitize_filename(pathlib.Path(urllib.parse.urlparse(url).path).name or "document.pdf")
-    fname = f"{hash_prefix}__{slug}"
-    path = os.path.join(OUT_DIR, fname)
-    with open(path, "wb") as f:
-        f.write(content)
-    return path
+def is_pdf_url(url):
+    """Check if a URL points to a PDF file."""
+    # Check if the URL ends with .pdf
+    if url.lower().endswith('.pdf'):
+        return True
+    
+    # Check if the URL contains pdf indicators
+    pdf_indicators = ['/pdf/', 'type=pdf', 'format=pdf', 'document.pdf', '.pdf?']
+    return any(indicator in url.lower() for indicator in pdf_indicators)
 
-def record_manifest(row: Dict[str, str]):
-    file_exists = os.path.exists(MANIFEST_CSV)
-    with open(MANIFEST_CSV, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "timestamp",
-                "source_url",
-                "status",
-                "reason",
-                "http_status",
-                "content_type",
-                "saved_path",
-                "sha256",
-            ],
-        )
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-# ------------ Main ------------
-def main():
-    try:
-        import SearchTerms  # your list lives here
-        SEARCH_TERMS = getattr(SearchTerms, "SEARCH_TERMS", [])
-        ALLOWED_DOMAINS = [d.lower() for d in getattr(SearchTerms, "ALLOWED_DOMAINS", [])]
-        SEED_URLS = getattr(SearchTerms, "SEED_URLS", [])
-    except Exception as e:
-        logging.error("Could not import SearchTerms.py: %s", e)
-        return
-
-    if not SEARCH_TERMS and not SEED_URLS:
-        logging.error("No SEARCH_TERMS and no SEED_URLS provided. Nothing to do.")
-        return
-
-    seen_urls = set()
-
-    # 1) Query via Bing API (if configured)
-    for term in SEARCH_TERMS:
-        for url in discover_via_bing(term):
-            seen_urls.add(url)
-
-    # 2) Crawl provided seed pages for .pdf links
-    for seed in SEED_URLS:
-        for url in crawl_for_pdfs(seed):
-            seen_urls.add(url)
-
-    if not seen_urls:
-        logging.info("No candidate PDF URLs discovered. Exiting.")
-        return
-
-    logging.info("Discovered %d candidate PDF URLs.", len(seen_urls))
-
-    # Filter by allowed domains, if specified
-    if ALLOWED_DOMAINS:
-        filtered = set()
-        for u in seen_urls:
-            net = domain_of(u)
-            if any(net.endswith(x) or net == x.lstrip(".") for x in ALLOWED_DOMAINS):
-                filtered.add(u)
-        seen_urls = filtered
-        logging.info("After domain filter, %d URLs remain.", len(seen_urls))
-
-    for url in sorted(seen_urls):
-        ts = datetime.utcnow().isoformat()
-        try:
-            # HEAD first (if allowed) to check content type and robots
-            head_resp = safe_get(url, stream=False, allow_redirects=True)
-            if not head_resp:
-                record_manifest({
-                    "timestamp": ts,
-                    "source_url": url,
-                    "status": "skipped",
-                    "reason": "robots_disallow_or_request_failed",
-                    "http_status": "",
-                    "content_type": "",
-                    "saved_path": "",
-                    "sha256": "",
-                })
-                continue
-
-            status = head_resp.status_code
-            ctype = head_resp.headers.get("Content-Type", "").lower()
-
-            if not (200 <= status < 400):
-                record_manifest({
-                    "timestamp": ts, "source_url": url, "status": "skipped",
-                    "reason": f"http_{status}", "http_status": str(status),
-                    "content_type": ctype, "saved_path": "", "sha256": "",
-                })
-                continue
-
-            if "pdf" not in ctype and not url.lower().endswith(".pdf"):
-                record_manifest({
-                    "timestamp": ts, "source_url": url, "status": "skipped",
-                    "reason": "not_pdf", "http_status": str(status),
-                    "content_type": ctype, "saved_path": "", "sha256": "",
-                })
-                continue
-
-            if headers_forbid_use(head_resp):
-                record_manifest({
-                    "timestamp": ts, "source_url": url, "status": "skipped",
-                    "reason": "x-robots-tag_forbids", "http_status": str(status),
-                    "content_type": ctype, "saved_path": "", "sha256": "",
-                })
-                continue
-
-            # GET the PDF
-            get_resp = safe_get(url, stream=True, allow_redirects=True)
-            if not get_resp or not (200 <= get_resp.status_code < 300):
-                record_manifest({
-                    "timestamp": ts, "source_url": url, "status": "skipped",
-                    "reason": "get_failed", "http_status": str(get_resp.status_code if get_resp else ""),
-                    "content_type": get_resp.headers.get("Content-Type", "") if get_resp else "",
-                    "saved_path": "", "sha256": "",
-                })
-                continue
-
-            if "application/pdf" not in get_resp.headers.get("Content-Type", "").lower() and not url.lower().endswith(".pdf"):
-                record_manifest({
-                    "timestamp": ts, "source_url": url, "status": "skipped",
-                    "reason": "not_pdf_after_get", "http_status": str(get_resp.status_code),
-                    "content_type": get_resp.headers.get("Content-Type", ""),
-                    "saved_path": "", "sha256": "",
-                })
-                continue
-
-            # Read bytes (streamed)
-            content = b""
+def search_for_pdfs(query, max_attempts=3):
+    """
+    Search for PDFs related to the query using multiple search engines.
+    Returns a list of PDF URLs.
+    """
+    all_pdf_urls = []
+    query_with_pdf = f"{query} filetype:pdf"
+    
+    # Try each search engine
+    for engine in SEARCH_ENGINES:
+        if len(all_pdf_urls) >= 10:  # Stop if we've found enough PDFs
+            break
+            
+        for attempt in range(max_attempts):
             try:
-                for chunk in get_resp.iter_content(chunk_size=1024 * 64):
-                    if chunk:
-                        content += chunk
-                        # soft limit: avoid huge files (e.g., > 40 MB)
-                        if len(content) > 40 * 1024 * 1024:
-                            raise RuntimeError("file_too_large")
+                print(f"Searching {engine['name']} (attempt {attempt+1})...")
+                
+                # Construct search URL
+                search_url = engine['url'].format(quote_plus(query_with_pdf))
+                
+                # Get search results with random headers and delay
+                headers = get_random_headers()
+                response = requests.get(search_url, headers=headers, timeout=10)
+                
+                if response.status_code != 200:
+                    print(f"  {engine['name']} returned status code {response.status_code}")
+                    time.sleep(random.uniform(2, 5))
+                    continue
+                
+                # Parse the HTML
+                soup = BeautifulSoup(response.text, 'html.parser')
+                links = soup.select(engine['selector'])
+                
+                # Extract and process links
+                for link in links:
+                    href = engine['link_extractor'](link)
+                    if not href:
+                        continue
+                        
+                    # Get the real URL from redirects
+                    real_url = extract_real_url(href)
+                    
+                    # Check if it's a PDF
+                    if is_pdf_url(real_url) and real_url not in all_pdf_urls:
+                        all_pdf_urls.append(real_url)
+                        print(f"  Found PDF: {real_url}")
+                
+                # If we found PDFs, no need for more attempts with this engine
+                if any(url for url in all_pdf_urls if engine['name'].lower() in url.lower()):
+                    break
+                    
+                # Random delay between attempts
+                time.sleep(random.uniform(3, 7))
+                
             except Exception as e:
-                record_manifest({
-                    "timestamp": ts, "source_url": url, "status": "skipped",
-                    "reason": f"stream_error:{e}", "http_status": str(get_resp.status_code),
-                    "content_type": get_resp.headers.get("Content-Type", ""),
-                    "saved_path": "", "sha256": "",
-                })
-                continue
-
-            netloc = domain_of(url)
-            allowed, reason = is_public_enough(url, get_resp, content, netloc)
-            if not allowed:
-                record_manifest({
-                    "timestamp": ts, "source_url": url, "status": "rejected",
-                    "reason": reason, "http_status": str(get_resp.status_code),
-                    "content_type": get_resp.headers.get("Content-Type", ""),
-                    "saved_path": "", "sha256": sha256_of_bytes(content),
-                })
-                continue
-
-            saved = save_pdf(url, content)
-            record_manifest({
-                "timestamp": ts, "source_url": url, "status": "saved",
-                "reason": reason, "http_status": str(get_resp.status_code),
-                "content_type": get_resp.headers.get("Content-Type", ""),
-                "saved_path": saved, "sha256": sha256_of_bytes(content),
-            })
-            logging.info(f"Saved: {saved}  ({reason})")
-
+                print(f"  Error with {engine['name']}: {str(e)}")
+                time.sleep(random.uniform(5, 10))
+        
+        # Random delay between search engines
+        time.sleep(random.uniform(5, 10))
+    
+    # If we still haven't found PDFs, try direct search for PDFs
+    if not all_pdf_urls:
+        try:
+            print("Searching for PDFs directly...")
+            for site in ['site:edu', 'site:gov', 'site:org', 'site:com']:
+                search_url = f"https://www.google.com/search?q={quote_plus(f'{query} {site} filetype:pdf')}&num=10"
+                headers = get_random_headers()
+                response = requests.get(search_url, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    links = soup.select('a[href]')
+                    
+                    for link in links:
+                        href = link.get('href')
+                        if not href:
+                            continue
+                            
+                        real_url = extract_real_url(href)
+                        if is_pdf_url(real_url) and real_url not in all_pdf_urls:
+                            all_pdf_urls.append(real_url)
+                            print(f"  Found PDF: {real_url}")
+                
+                # Random delay
+                time.sleep(random.uniform(5, 8))
         except Exception as e:
-            logging.exception(f"Unhandled error for {url}: {e}")
-            record_manifest({
-                "timestamp": ts, "source_url": url, "status": "error",
-                "reason": str(e), "http_status": "", "content_type": "",
-                "saved_path": "", "sha256": "",
-            })
+            print(f"  Error in direct PDF search: {str(e)}")
+    
+    # Verify each URL is actually a PDF by checking headers
+    verified_pdf_urls = []
+    for url in all_pdf_urls:
+        try:
+            # Send a HEAD request to check content type
+            head_response = requests.head(url, headers=get_random_headers(), timeout=5)
+            content_type = head_response.headers.get('Content-Type', '').lower()
+            
+            if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
+                verified_pdf_urls.append(url)
+            else:
+                print(f"  Not a PDF: {url} (Content-Type: {content_type})")
+                
+        except Exception as e:
+            print(f"  Error verifying URL {url}: {str(e)}")
+    
+    print(f"Found {len(verified_pdf_urls)} verified PDF URLs")
+    return verified_pdf_urls
+
+def download_pdf(url, save_path):
+    """
+    Download a PDF from the given URL and save it to the specified path.
+    """
+    try:
+        # Generate a unique filename based on the URL
+        parsed_url = urlparse(url)
+        path_parts = parsed_url.path.split('/')
+        
+        # Try to get a filename from the URL
+        filename = next((part for part in reversed(path_parts) if part and '.' in part), None)
+        
+        # If no suitable filename found, generate one
+        if not filename or not filename.lower().endswith('.pdf'):
+            filename = f"document_{int(time.time())}_{hash(url) % 10000}.pdf"
+        
+        # Clean the filename to remove invalid characters
+        filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
+        
+        # Ensure filename ends with .pdf
+        if not filename.lower().endswith('.pdf'):
+            filename += '.pdf'
+        
+        file_path = os.path.join(save_path, filename)
+        
+        # Download the PDF
+        print(f"Downloading: {url} -> {filename}")
+        response = requests.get(url, headers=get_random_headers(), timeout=30, stream=True)
+        response.raise_for_status()
+        
+        # Save the PDF
+        with open(file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        # Verify the file size
+        file_size = os.path.getsize(file_path)
+        if file_size < 1000:  # Less than 1KB, probably not a valid PDF
+            print(f"  Warning: Very small file ({file_size} bytes), might not be a valid PDF")
+        
+        print(f"  Downloaded: {filename} ({file_size/1024:.1f} KB)")
+        return file_path
+    
+    except Exception as e:
+        print(f"  Error downloading PDF from {url}: {str(e)}")
+        return None
+
+def download_and_organize_pdfs():
+    """
+    Download PDFs for each search term in the categories dictionary and organize them into folders.
+    """
+    total_downloads = 0
+    max_pdfs_per_term = 5  # Limit PDFs per search term to avoid excessive downloads
+    
+    selected_categories = categories
+    
+    # Ask about max PDFs per term
+    try:
+        user_max = input("Maximum PDFs to download per search term (default: 5): ")
+        if user_max.strip():
+            max_pdfs_per_term = int(user_max)
+    except:
+        print(f"Using default limit of {max_pdfs_per_term} PDFs per search term")
+    
+    for category, searches in selected_categories.items():
+        print(f"\nProcessing category: {category}")
+        category_path = os.path.join(base_path, category)
+        
+        # Create category directory
+        if not os.path.exists(category_path):
+            os.makedirs(category_path)
+        
+        # Process all terms in this category
+        term_subset = searches
+        
+        for search in term_subset:
+            print(f"\nSearching for PDFs related to: {search}")
+            try:
+                # Search for PDFs
+                pdf_urls = search_for_pdfs(search)
+                
+                if not pdf_urls:
+                    print(f"No PDF results found for: {search}")
+                    continue
+                
+                # Limit the number of PDFs to download
+                pdf_urls = pdf_urls[:max_pdfs_per_term]
+                print(f"Found {len(pdf_urls)} PDF links for: {search}")
+                
+                # Create a subfolder for this search term
+                search_folder = re.sub(r'[\\/*?:"<>|]', '_', search)
+                search_folder = search_folder.replace(' ', '_')[:50]  # Limit folder name length
+                search_path = os.path.join(category_path, search_folder)
+                if not os.path.exists(search_path):
+                    os.makedirs(search_path)
+                
+                # Download each PDF
+                downloaded_count = 0
+                for url in pdf_urls:
+                    if download_pdf(url, search_path):
+                        downloaded_count += 1
+                        total_downloads += 1
+                    
+                    # Random delay between downloads
+                    time.sleep(random.uniform(2, 5))
+                
+                print(f"Downloaded {downloaded_count} PDFs for: {search}")
+                
+                # Longer delay between search terms
+                time.sleep(random.uniform(5, 10))
+                
+            except Exception as e:
+                print(f"Error processing search term '{search}': {str(e)}")
+                continue
+        
+        # Count PDFs in category
+        try:
+            num_pdfs = sum(len([f for f in os.listdir(os.path.join(category_path, d)) 
+                            if f.lower().endswith('.pdf')]) 
+                        for d in os.listdir(category_path) 
+                        if os.path.isdir(os.path.join(category_path, d)))
+            print(f"\nCompleted {category} with {num_pdfs} PDFs")
+        except Exception as e:
+            print(f"Error counting PDFs in {category}: {str(e)}")
+    
+    return total_downloads
 
 if __name__ == "__main__":
-    main()
+    print("Starting PDF download process...")
+    
+    # Start the main download process
+    total_pdfs = download_and_organize_pdfs()
+    
+    print(f"\nDownload complete! Downloaded a total of {total_pdfs} PDFs.")
+    print(f"Check the 'Google PDF Downloader' folder in the project directory.")
