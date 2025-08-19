@@ -1,233 +1,382 @@
 """
 PDF Downloader Core Module
-Handles PDF searching, downloading, and organization with real web scraping
+Real web-wide search for technical documentation
 """
 
 import os
 import requests
 import time
-from urllib.parse import urljoin, urlparse, quote_plus
+from urllib.parse import urljoin, urlparse, quote_plus, unquote
 from bs4 import BeautifulSoup
 import json
 from datetime import datetime
 import re
+import random
 
 class PDFDownloader:
     def __init__(self):
         """Initialize the PDF downloader"""
         self.base_path = os.path.join(os.path.expanduser('~'), 'Desktop', 'DataCenter_PDF_Library')
         self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        })
+        
+        # Rotate user agents to avoid detection
+        self.user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+        ]
+        
         self.downloaded_files = []
         
         # Create base directory
         if not os.path.exists(self.base_path):
             os.makedirs(self.base_path)
     
-    def search_and_download_pdfs(self, search_term, category, max_results=5):
-        """Search for and download PDFs for a given term"""
+    def _get_random_headers(self):
+        """Get random headers to avoid detection"""
+        return {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+        }
+    
+    def search_and_download_pdfs(self, search_term, category, max_results=10):
+        """Search the entire web for PDFs"""
         category_path = os.path.join(self.base_path, category)
         if not os.path.exists(category_path):
             os.makedirs(category_path)
         
-        print(f"  🔍 Searching for: {search_term}")
+        print(f"  🌐 Web-wide search for: {search_term}")
         
-        # Search multiple sources
+        # Multiple search engines and methods
         pdf_urls = []
         
-        # Search vendor documentation sites
-        pdf_urls.extend(self._search_vendor_sites(search_term, max_results//2))
+        # 1. DuckDuckGo (most permissive for automated searches)
+        pdf_urls.extend(self._search_duckduckgo(search_term, max_results//3))
         
-        # Search general documentation sites
-        pdf_urls.extend(self._search_documentation_sites(search_term, max_results//2))
+        # 2. Bing search (less restrictive than Google)
+        pdf_urls.extend(self._search_bing(search_term, max_results//3))
         
-        # Remove duplicates
-        pdf_urls = list(set(pdf_urls))
+        # 3. Yandex search (alternative search engine)
+        pdf_urls.extend(self._search_yandex(search_term, max_results//4))
+        
+        # 4. Archive.org search
+        pdf_urls.extend(self._search_archive_org(search_term, max_results//4))
+        
+        # 5. Academic and repository sites
+        pdf_urls.extend(self._search_academic_sites(search_term, max_results//4))
+        
+        # 6. Technical documentation aggregators
+        pdf_urls.extend(self._search_doc_aggregators(search_term, max_results//4))
+        
+        # Remove duplicates and validate
+        unique_urls = list(set(pdf_urls))
+        print(f"    📋 Found {len(unique_urls)} unique PDF candidates")
         
         downloaded_count = 0
-        for url in pdf_urls[:max_results]:
+        for i, url in enumerate(unique_urls[:max_results]):
+            print(f"    📥 Processing {i+1}/{min(len(unique_urls), max_results)}: {url[:80]}...")
+            
             if self._download_pdf(url, category_path, search_term):
                 downloaded_count += 1
-                time.sleep(2)  # Rate limiting
+            
+            # Random delay to be respectful
+            time.sleep(random.uniform(1, 3))
         
         return downloaded_count > 0
     
-    def _search_vendor_sites(self, search_term, limit=3):
-        """Search specific vendor documentation sites"""
-        pdf_urls = []
-        
-        # Dell Support Site
-        if 'dell' in search_term.lower():
-            pdf_urls.extend(self._search_dell_support(search_term, limit))
-        
-        # HP/HPE Support
-        if any(x in search_term.lower() for x in ['hp', 'hpe', 'proliant']):
-            pdf_urls.extend(self._search_hpe_support(search_term, limit))
-        
-        # Cisco Documentation
-        if 'cisco' in search_term.lower():
-            pdf_urls.extend(self._search_cisco_docs(search_term, limit))
-        
-        return pdf_urls
-    
-    def _search_dell_support(self, search_term, limit=2):
-        """Search Dell support documentation"""
+    def _search_duckduckgo(self, search_term, limit=5):
+        """Search DuckDuckGo for PDFs"""
         urls = []
         try:
-            # Search Dell's support site
-            search_url = f"https://www.dell.com/support/manuals/en-us"
-            response = self.session.get(search_url, timeout=10)
+            self.session.headers.update(self._get_random_headers())
             
+            # DuckDuckGo search with filetype filter
+            search_query = f"{search_term} filetype:pdf"
+            encoded_query = quote_plus(search_query)
+            ddg_url = f"https://duckduckgo.com/html/?q={encoded_query}"
+            
+            response = self.session.get(ddg_url, timeout=15)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
-                # Look for PDF links
-                pdf_links = soup.find_all('a', href=re.compile(r'\.pdf$', re.I))
                 
-                for link in pdf_links[:limit]:
+                # Find result links
+                links = soup.find_all('a', {'class': 'result__a'})
+                
+                for link in links[:limit*2]:
                     href = link.get('href')
-                    if href:
-                        full_url = urljoin(search_url, href)
-                        if self._is_valid_pdf_url(full_url):
-                            urls.append(full_url)
+                    if href and self._is_pdf_url(href):
+                        # Clean DuckDuckGo redirect URL
+                        if '/l/?uddg=' in href:
+                            clean_url = unquote(href.split('/l/?uddg=')[1].split('&')[0])
+                            urls.append(clean_url)
+                        elif href.startswith('http'):
+                            urls.append(href)
                             
+            print(f"    🦆 DuckDuckGo found {len(urls)} PDFs")
+            
         except Exception as e:
-            print(f"    Error searching Dell support: {e}")
+            print(f"    ⚠️  DuckDuckGo error: {e}")
         
-        return urls
+        return urls[:limit]
     
-    def _search_hpe_support(self, search_term, limit=2):
-        """Search HPE support documentation"""
+    def _search_bing(self, search_term, limit=5):
+        """Search Bing for PDFs"""
         urls = []
         try:
-            # Known HPE documentation URLs
-            hpe_docs = [
-                "https://support.hpe.com/hpesc/public/docDisplay?docId=c04111714",
-                "https://support.hpe.com/hpesc/public/docDisplay?docId=c04111715",
-                "https://support.hpe.com/hpesc/public/docDisplay?docId=c04795161"
-            ]
+            self.session.headers.update(self._get_random_headers())
             
-            for doc_url in hpe_docs[:limit]:
-                if self._is_valid_pdf_url(doc_url):
-                    urls.append(doc_url)
-                    
+            search_query = f"{search_term} filetype:pdf"
+            encoded_query = quote_plus(search_query)
+            bing_url = f"https://www.bing.com/search?q={encoded_query}"
+            
+            response = self.session.get(bing_url, timeout=15)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Bing result links
+                links = soup.find_all('a', href=True)
+                
+                for link in links:
+                    href = link.get('href')
+                    if href and self._is_pdf_url(href) and 'bing.com' not in href:
+                        urls.append(href)
+                        if len(urls) >= limit:
+                            break
+                            
+            print(f"    🔍 Bing found {len(urls)} PDFs")
+            
         except Exception as e:
-            print(f"    Error searching HPE support: {e}")
+            print(f"    ⚠️  Bing error: {e}")
         
-        return urls
+        return urls[:limit]
     
-    def _search_cisco_docs(self, search_term, limit=2):
-        """Search Cisco documentation"""
+    def _search_yandex(self, search_term, limit=3):
+        """Search Yandex for PDFs"""
         urls = []
         try:
-            # Cisco documentation often has direct PDF links
-            cisco_base = "https://www.cisco.com/c/en/us/support/"
+            self.session.headers.update(self._get_random_headers())
             
-            # Common Cisco documentation patterns
-            cisco_docs = [
-                "https://www.cisco.com/c/dam/en/us/products/collateral/switches/catalyst-9300-series-switches/nb-06-cat9300-cmp-cte-en.pdf",
-                "https://www.cisco.com/c/dam/en/us/products/collateral/switches/nexus-9000-series-switches/datasheet-c78-729405.pdf"
-            ]
+            search_query = f"{search_term} filetype:pdf"
+            encoded_query = quote_plus(search_query)
+            yandex_url = f"https://yandex.com/search/?text={encoded_query}"
             
-            for doc_url in cisco_docs[:limit]:
-                if self._check_url_exists(doc_url):
-                    urls.append(doc_url)
-                    
+            response = self.session.get(yandex_url, timeout=15)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                links = soup.find_all('a', href=True)
+                
+                for link in links:
+                    href = link.get('href')
+                    if href and self._is_pdf_url(href) and 'yandex.' not in href:
+                        urls.append(href)
+                        if len(urls) >= limit:
+                            break
+                            
+            print(f"    🔴 Yandex found {len(urls)} PDFs")
+            
         except Exception as e:
-            print(f"    Error searching Cisco docs: {e}")
+            print(f"    ⚠️  Yandex error: {e}")
         
-        return urls
+        return urls[:limit]
     
-    def _search_documentation_sites(self, search_term, limit=3):
-        """Search general technical documentation sites"""
-        urls = []
-        
-        # Search academic and technical sites
-        doc_sites = [
-            self._search_archive_org(search_term, limit//3),
-            self._search_manufacturer_sites(search_term, limit//3)
-        ]
-        
-        for site_urls in doc_sites:
-            urls.extend(site_urls)
-        
-        return urls
-    
-    def _search_archive_org(self, search_term, limit=2):
+    def _search_archive_org(self, search_term, limit=3):
         """Search Internet Archive for technical documentation"""
         urls = []
         try:
-            # Search Internet Archive's software and manual collections
-            search_query = quote_plus(f"{search_term} filetype:pdf")
-            archive_url = f"https://archive.org/search.php?query={search_query}&and[]=mediatype%3A%22texts%22"
+            self.session.headers.update(self._get_random_headers())
             
-            response = self.session.get(archive_url, timeout=10)
+            # Archive.org search
+            search_query = quote_plus(f"{search_term} AND mediatype:texts")
+            archive_url = f"https://archive.org/search.php?query={search_query}&and[]=format%3A%22PDF%22"
+            
+            response = self.session.get(archive_url, timeout=15)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Look for PDF download links
-                pdf_links = soup.find_all('a', href=re.compile(r'\.pdf$', re.I))
+                # Look for download links
+                download_links = soup.find_all('a', href=re.compile(r'\.pdf$', re.I))
                 
-                for link in pdf_links[:limit]:
+                for link in download_links[:limit]:
                     href = link.get('href')
-                    if href and href.startswith('/'):
-                        full_url = f"https://archive.org{href}"
+                    if href:
+                        if href.startswith('/'):
+                            full_url = f"https://archive.org{href}"
+                        else:
+                            full_url = href
                         urls.append(full_url)
                         
+            print(f"    📚 Archive.org found {len(urls)} PDFs")
+            
         except Exception as e:
-            print(f"    Error searching Archive.org: {e}")
+            print(f"    ⚠️  Archive.org error: {e}")
         
-        return urls
+        return urls[:limit]
     
-    def _search_manufacturer_sites(self, search_term, limit=2):
-        """Search known manufacturer documentation sites"""
+    def _search_academic_sites(self, search_term, limit=3):
+        """Search academic and research sites"""
         urls = []
         
-        # Known technical documentation URLs (examples)
-        known_docs = [
-            "https://www.supermicro.com/manuals/motherboard/C606/MBD-X9DRW-iF_3F.pdf",
-            "https://www.supermicro.com/manuals/motherboard/C602/MBD-X9DRi-LN4+_F.pdf",
-            "https://www.intel.com/content/dam/www/public/us/en/documents/guides/64-ia-32-architectures-software-developer-instruction-set-reference-manual-325383.pdf"
+        # Known academic repositories with technical documentation
+        academic_sites = [
+            "https://www.researchgate.net",
+            "https://arxiv.org",
+            "https://ieeexplore.ieee.org",
+            "https://dl.acm.org"
         ]
         
-        # Filter based on search term relevance
-        for doc_url in known_docs[:limit]:
-            if any(keyword in search_term.lower() for keyword in ['supermicro', 'intel', 'motherboard', 'processor']):
-                if self._check_url_exists(doc_url):
-                    urls.append(doc_url)
+        try:
+            for site in academic_sites:
+                site_urls = self._search_specific_site(site, search_term, limit//len(academic_sites))
+                urls.extend(site_urls)
+                
+            print(f"    🎓 Academic sites found {len(urls)} PDFs")
+            
+        except Exception as e:
+            print(f"    ⚠️  Academic search error: {e}")
         
-        return urls
+        return urls[:limit]
     
-    def _is_valid_pdf_url(self, url):
-        """Check if URL points to a valid PDF"""
-        try:
-            response = self.session.head(url, timeout=5)
-            content_type = response.headers.get('content-type', '').lower()
-            return 'application/pdf' in content_type or url.lower().endswith('.pdf')
-        except:
-            return url.lower().endswith('.pdf')
+    def _search_doc_aggregators(self, search_term, limit=3):
+        """Search documentation aggregator sites"""
+        urls = []
+        
+        # Sites that aggregate technical documentation
+        doc_sites = [
+            ("https://manualslib.com", "manual documentation"),
+            ("https://fccid.io", "FCC equipment documentation"),
+            ("https://www.manualsdir.com", "technical manuals")
+        ]
+        
+        for site_url, description in doc_sites:
+            try:
+                self.session.headers.update(self._get_random_headers())
+                
+                # Search within the site
+                search_url = f"{site_url}/search?q={quote_plus(search_term)}"
+                
+                response = self.session.get(search_url, timeout=10)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    
+                    pdf_links = soup.find_all('a', href=re.compile(r'\.pdf$', re.I))
+                    
+                    for link in pdf_links[:limit//len(doc_sites)]:
+                        href = link.get('href')
+                        if href:
+                            full_url = urljoin(site_url, href)
+                            urls.append(full_url)
+                            
+            except Exception as e:
+                continue
+        
+        print(f"    📋 Documentation sites found {len(urls)} PDFs")
+        return urls[:limit]
     
-    def _check_url_exists(self, url):
-        """Check if URL exists and is accessible"""
+    def _search_specific_site(self, site_url, search_term, limit=2):
+        """Search a specific site for PDFs"""
+        urls = []
         try:
-            response = self.session.head(url, timeout=5)
-            return response.status_code == 200
-        except:
+            # Use site-specific search if available
+            search_query = f"site:{site_url} {search_term} filetype:pdf"
+            ddg_search = f"https://duckduckgo.com/html/?q={quote_plus(search_query)}"
+            
+            self.session.headers.update(self._get_random_headers())
+            response = self.session.get(ddg_search, timeout=10)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                links = soup.find_all('a', {'class': 'result__a'})
+                
+                for link in links[:limit]:
+                    href = link.get('href')
+                    if href and self._is_pdf_url(href):
+                        if '/l/?uddg=' in href:
+                            clean_url = unquote(href.split('/l/?uddg=')[1].split('&')[0])
+                            urls.append(clean_url)
+                        elif href.startswith('http'):
+                            urls.append(href)
+                            
+        except Exception as e:
+            pass
+        
+        return urls[:limit]
+    
+    def _is_pdf_url(self, url):
+        """Check if URL likely points to a PDF"""
+        if not url or not isinstance(url, str):
             return False
+        
+        url_lower = url.lower()
+        
+        # Direct PDF extension
+        if url_lower.endswith('.pdf'):
+            return True
+        
+        # PDF in URL path
+        if '.pdf' in url_lower:
+            return True
+        
+        # Common PDF URL patterns
+        pdf_patterns = [
+            'download.pdf',
+            'manual.pdf',
+            'guide.pdf',
+            'documentation.pdf',
+            'doc.pdf'
+        ]
+        
+        return any(pattern in url_lower for pattern in pdf_patterns)
     
     def _download_pdf(self, url, category_path, search_term):
-        """Download a PDF file"""
+        """Download a PDF file with comprehensive error handling"""
         try:
-            print(f"    📥 Attempting download: {url}")
-            response = self.session.get(url, timeout=30)
+            # Update headers for each download
+            self.session.headers.update(self._get_random_headers())
+            
+            print(f"      📥 Downloading: {url}")
+            
+            # Handle redirects and get final URL
+            response = self.session.get(url, timeout=30, allow_redirects=True, stream=True)
             response.raise_for_status()
             
-            # Verify it's actually a PDF
-            content_type = response.headers.get('content-type', '')
-            if 'application/pdf' not in content_type and not url.lower().endswith('.pdf'):
-                print(f"    ⚠️  Not a PDF file: {content_type}")
+            # Check content type
+            content_type = response.headers.get('content-type', '').lower()
+            
+            # Read content in chunks for large files
+            content = b''
+            for chunk in response.iter_content(chunk_size=8192):
+                content += chunk
+                
+            # Verify it's a PDF
+            is_pdf = (
+                'application/pdf' in content_type or
+                url.lower().endswith('.pdf') or
+                content.startswith(b'%PDF') or
+                b'PDF' in content[:100]
+            )
+            
+            if not is_pdf:
+                print(f"      ⚠️  Not a PDF file (Content-Type: {content_type})")
                 return False
+            
+            # Check file size
+            content_length = len(content)
+            if content_length < 1024:  # Less than 1KB
+                print(f"      ⚠️  File too small ({content_length} bytes)")
+                return False
+            
+            # Log large files
+            if content_length > 50 * 1024 * 1024:  # More than 50MB
+                print(f"      📚 Large file ({content_length / (1024*1024):.1f} MB)")
             
             # Generate filename
             filename = self._generate_filename(url, search_term)
@@ -235,12 +384,12 @@ class PDFDownloader:
             
             # Don't download if file already exists
             if os.path.exists(filepath):
-                print(f"    ✅ File already exists: {filename}")
+                print(f"      ✅ File already exists: {filename}")
                 return True
             
             # Save the PDF
             with open(filepath, 'wb') as f:
-                f.write(response.content)
+                f.write(content)
             
             # Track download
             self.downloaded_files.append({
@@ -248,56 +397,87 @@ class PDFDownloader:
                 'url': url,
                 'category': os.path.basename(category_path),
                 'search_term': search_term,
-                'size': len(response.content),
+                'size': content_length,
                 'timestamp': datetime.now().isoformat()
             })
             
-            print(f"    ✅ Downloaded: {filename} ({len(response.content)} bytes)")
+            print(f"      ✅ SUCCESS: {filename} ({content_length / 1024:.1f} KB)")
             return True
             
+        except requests.exceptions.RequestException as e:
+            print(f"      ❌ Network error: {str(e)[:100]}")
+            return False
         except Exception as e:
-            print(f"    ❌ Failed to download {url}: {str(e)}")
+            print(f"      ❌ Download error: {str(e)[:100]}")
             return False
     
     def _generate_filename(self, url, search_term):
-        """Generate a descriptive filename for the PDF"""
+        """Generate a safe filename for the PDF"""
         # Extract filename from URL
         parsed_url = urlparse(url)
-        original_name = os.path.basename(parsed_url.path)
+        path = unquote(parsed_url.path)
+        original_name = os.path.basename(path)
         
-        if not original_name or not original_name.endswith('.pdf'):
-            # Generate name from search term
-            safe_term = "".join(c for c in search_term if c.isalnum() or c in (' ', '-', '_')).rstrip()
-            original_name = f"{safe_term.replace(' ', '_')}.pdf"
+        # Clean the filename
+        if original_name and '.' in original_name:
+            name = original_name.split('?')[0].split('#')[0]
+            if not name.lower().endswith('.pdf'):
+                name += '.pdf'
+        else:
+            # Generate from search term
+            safe_term = re.sub(r'[^\w\s-]', '', search_term)
+            name = f"{safe_term.replace(' ', '_')}.pdf"
         
-        # Ensure unique filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        name, ext = os.path.splitext(original_name)
-        return f"{name}_{timestamp}{ext}"
+        # Ensure filename is filesystem-safe
+        name = re.sub(r'[<>:"/\\|?*]', '_', name)
+        name = name[:100]  # Limit length
+        
+        # Add timestamp for uniqueness
+        timestamp = datetime.now().strftime("%m%d_%H%M")
+        name_parts = name.rsplit('.', 1)
+        if len(name_parts) == 2:
+            final_name = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
+        else:
+            final_name = f"{name}_{timestamp}.pdf"
+        
+        return final_name
     
     def generate_summary_report(self):
-        """Generate a summary report of all downloads"""
+        """Generate comprehensive summary report"""
         report_path = os.path.join(self.base_path, 'download_report.json')
+        
+        total_size = sum(f['size'] for f in self.downloaded_files)
         
         summary = {
             'total_files': len(self.downloaded_files),
+            'total_size_mb': total_size / (1024 * 1024),
             'categories': {},
             'files': self.downloaded_files,
-            'generated_at': datetime.now().isoformat()
+            'generated_at': datetime.now().isoformat(),
+            'search_summary': {
+                'total_searches': len(set(f['search_term'] for f in self.downloaded_files)),
+                'successful_downloads': len(self.downloaded_files)
+            }
         }
         
         # Group by category
         for file_info in self.downloaded_files:
             category = file_info['category']
             if category not in summary['categories']:
-                summary['categories'][category] = 0
-            summary['categories'][category] += 1
+                summary['categories'][category] = {'count': 0, 'size_mb': 0}
+            summary['categories'][category]['count'] += 1
+            summary['categories'][category]['size_mb'] += file_info['size'] / (1024 * 1024)
         
         with open(report_path, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        print(f"\n📊 Summary Report:")
-        print(f"Total files downloaded: {summary['total_files']}")
-        for category, count in summary['categories'].items():
-            print(f"  {category}: {count} files")
-        print(f"Report saved to: {report_path}")
+        print(f"\n🎯 FINAL SUMMARY:")
+        print(f"📁 Total files downloaded: {summary['total_files']}")
+        print(f"💾 Total size: {summary['total_size_mb']:.1f} MB")
+        print(f"🔍 Search terms processed: {summary['search_summary']['total_searches']}")
+        
+        for category, stats in summary['categories'].items():
+            print(f"  📂 {category}: {stats['count']} files ({stats['size_mb']:.1f} MB)")
+            
+        print(f"\n📊 Detailed report: {report_path}")
+        print(f"📁 Files location: {self.base_path}")
