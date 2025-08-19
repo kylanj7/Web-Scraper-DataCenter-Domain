@@ -3,6 +3,7 @@ beautifulsoup4>=4.11.0
 urllib3>=1.26.0
 lxml>=4.9.0  
 html5lib>=1.1
-# pytest>=7.0.0  
+# test>=7.0.0  
 # black>=22.0.0  
 # flake8>=5.0.0  
+
