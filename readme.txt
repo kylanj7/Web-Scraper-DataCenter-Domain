@@ -1,246 +1,191 @@
-# Public PDF Scraper
+# Google PDF Downloader
 
-A responsible, ethical PDF scraping tool designed for data center technicians and IT professionals to collect publicly available technical documentation, troubleshooting guides, and certification materials.
+A comprehensive Python tool designed for data center technicians to automatically search and download technical documentation, troubleshooting guides, and certification materials from multiple search engines.
 
-## 🎯 Purpose
+## Features
 
-This tool helps data center technicians and IT professionals discover and collect publicly available PDF documentation including:
+- **Multi-Engine Search**: Searches across Google, Bing, and DuckDuckGo for maximum coverage
+- **Smart PDF Detection**: Automatically identifies and verifies PDF files
+- **Organized Storage**: Downloads are organized by category and search term
+- **Rate Limiting**: Built-in delays and user agent rotation to avoid detection
+- **Comprehensive Categories**: Covers major server brands, networking, storage, and certification materials
+- **Verification System**: Validates PDFs by checking content type headers
 
-- Server hardware troubleshooting guides
-- Vendor-specific service manuals (Dell, HP, IBM, Quanta, etc.)
-- Network infrastructure documentation
-- Storage system troubleshooting procedures
-- Certification study materials
-- Data center operations procedures
+## Installation
 
-## ✨ Features
+1. Clone or download the project files
+2. Install required dependencies:
+```bash
+pip install -r requirements.txt
+```
 
-- **Ethical & Legal Compliance**: Respects robots.txt, X-Robots-Tag headers, and copyright notices
-- **Smart License Detection**: Automatically identifies Creative Commons, Public Domain, and government works
-- **Rate Limiting**: Built-in delays to be respectful to target servers
-- **Comprehensive Coverage**: 1000+ search terms focused on data center operations
-- **Multiple Discovery Methods**: Bing API integration + web crawling
-- **Detailed Logging**: Complete audit trail of all activities
-- **Content Validation**: Ensures downloaded files are actually PDFs
+## Usage
 
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Python 3.8+
-- Bing Web Search API key (optional but recommended)
-
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd pdf-scraper
-   ```
-
-2. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Set up Bing API (optional)**
-   ```bash
-   export BING_API_KEY="your_bing_api_key_here"
-   ```
-   Or create a `.env` file:
-   ```
-   BING_API_KEY=your_bing_api_key_here
-   ```
-
-### Basic Usage
-
+1. **Basic Usage**:
 ```bash
 python main.py
 ```
 
-The scraper will:
-1. Search for PDFs using predefined technical search terms
-2. Evaluate each PDF for public availability and licensing
-3. Download approved PDFs to the `public_pdfs/` directory
-4. Log all activities to `manifest.csv` and `scrape.log`
+2. **Customize Download Limits**:
+   - The script will prompt you for the maximum number of PDFs per search term (default: 5)
+   - You can modify the search categories in `SearchTerms.py`
 
-## 📋 Configuration
-
-### Search Terms
-
-The search terms are organized into focused categories in `SearchTerms.py`:
-
-- **Server Hardware Troubleshooting**: General server diagnostics and repair
-- **Vendor-Specific Guides**: Dell, HP/HPE, Quanta, IBM/Lenovo documentation
-- **Network Infrastructure**: Switch, router, and network troubleshooting
-- **Storage Systems**: SAN, NAS, and storage array documentation
-- **Power & Cooling**: UPS, PDU, HVAC troubleshooting
-- **Certification Materials**: CompTIA, vendor certifications, advanced technical certs
-
-### Rate Limiting
-
-Default settings are conservative and respectful:
-
-```python
-REQUESTS_PER_MIN = 10          # Global rate limit
-PER_DOMAIN_DELAY = 10.0        # Seconds between requests to same domain
+3. **Output Structure**:
 ```
-
-### Allowed Domains (Optional)
-
-You can restrict scraping to specific domains by adding to `SearchTerms.py`:
-
-```python
-ALLOWED_DOMAINS = [
-    ".gov",           # Government sites
-    ".edu",           # Educational institutions
-    "dell.com",       # Vendor documentation
-    "hpe.com",
-    # Add more as needed
-]
-```
-
-## 🛡️ Ethical Guidelines
-
-This tool is designed with strong ethical principles:
-
-### What Gets Downloaded
-- ✅ Creative Commons licensed content
-- ✅ Public Domain materials
-- ✅ U.S. Government works (17 USC 105)
-- ✅ Open Government License content
-- ✅ Documents from likely-public domains (.gov, .mil, .edu) without restrictive language
-
-### What Gets Rejected
-- ❌ Content with "All Rights Reserved" notices
-- ❌ Explicit copyright restrictions
-- ❌ Sites with X-Robots-Tag: noindex/noarchive/noai
-- ❌ Content blocked by robots.txt
-- ❌ Files larger than 40MB
-
-### Respectful Behavior
-- Honors robots.txt for all domains
-- Implements substantial delays between requests
-- Uses descriptive User-Agent string
-- Logs all activities for transparency
-- Fails conservatively when licensing is unclear
-
-## 📊 Output Structure
-
-### Downloaded Files
-```
-public_pdfs/
-├── a1b2c3d4e5f6__server_troubleshooting_guide.pdf
-├── f6e5d4c3b2a1__network_configuration_manual.pdf
+Google PDF Downloader/
+├── Server_Hardware_Troubleshooting/
+│   ├── data_center_server_hardware_troubleshooting/
+│   │   ├── document1.pdf
+│   │   └── document2.pdf
+│   └── server_POST_error_codes_troubleshooting/
+├── Dell_Server_Troubleshooting/
+├── HP_HPE_Server_Troubleshooting/
 └── ...
 ```
 
-Files are named with:
-- First 12 characters of SHA256 hash (for uniqueness)
-- Sanitized original filename
+## Search Categories
 
-### Manifest CSV
-Tracks all scraping activity:
+The tool includes extensive search categories covering:
 
-| Column | Description |
-|--------|-------------|
-| timestamp | ISO timestamp of processing |
-| source_url | Original PDF URL |
-| status | saved/rejected/skipped/error |
-| reason | Detailed explanation |
-| http_status | HTTP response code |
-| content_type | Server-reported content type |
-| saved_path | Local file path (if saved) |
-| sha256 | File hash (for deduplication) |
+### Hardware Troubleshooting
+- **Server Hardware**: General server troubleshooting, POST errors, thermal management
+- **Dell Servers**: PowerEdge series, iDRAC, PERC RAID controllers
+- **HP/HPE Servers**: ProLiant series, iLO, SmartArray controllers
+- **Quanta Servers**: QuantaGrid, QuantaPlex, hyperscale solutions
+- **IBM/Lenovo**: ThinkSystem, Power Systems, XClarity management
 
-### Log File
-Detailed activity log in `scrape.log` with timestamps and status information.
+### Infrastructure
+- **Network Infrastructure**: Switch configuration, VLAN troubleshooting, fiber optics
+- **Storage Systems**: SAN/NAS troubleshooting, RAID arrays, backup systems
+- **Power & Cooling**: UPS systems, PDUs, HVAC troubleshooting
+- **Hardware Components**: Memory, storage, network cards, cables
 
-## 🔧 Advanced Usage
+### Management & Operations
+- **Remote Management**: BMC, IPMI, out-of-band management
+- **Operating Systems**: Linux/Windows server troubleshooting
+- **Monitoring & Alerting**: SNMP, system monitoring, performance baselines
+- **Security & Compliance**: ISO 27001, SOC 2, security procedures
 
-### Custom Search Terms
+### Certifications
+- **CompTIA**: A+, Network+, Security+, Server+, Linux+
+- **Vendor Certifications**: Dell EMC, HPE, Cisco, VMware, Microsoft, Red Hat
+- **Advanced Certifications**: ITIL, CISSP, cloud certifications
 
-Add your own search categories to `SearchTerms.py`:
+## Configuration
+
+### Modifying Search Terms
+
+Edit `SearchTerms.py` to customize search categories:
 
 ```python
-def get_search_categories():
-    categories = {
-        'Custom_Category': [
-            'your custom search term 1',
-            'your custom search term 2',
-            # ...
-        ],
-        # ... existing categories
+def get_advanced_categories():
+    return {
+        'Your_Custom_Category': [
+            'your search term 1',
+            'your search term 2',
+            # ... more terms
+        ]
     }
-    return categories
 ```
 
-### Seed URL Crawling
+### Search Engine Configuration
 
-Add specific pages to crawl for PDF links:
+The tool uses multiple search engines with different selectors. You can modify the `SEARCH_ENGINES` list in `main.py` to add or remove search engines.
+
+### User Agent Rotation
+
+The script rotates between multiple user agents to avoid detection. Additional user agents can be added to the `USER_AGENTS` list.
+
+## Advanced Features
+
+### PDF Verification
+- Sends HEAD requests to verify content type
+- Filters out non-PDF responses
+- Checks file size to avoid empty downloads
+
+### Smart URL Extraction
+- Handles search engine redirect URLs
+- Extracts real URLs from Google, Bing, and DuckDuckGo
+- Supports various PDF URL formats
+
+### Rate Limiting
+- Random delays between requests (2-10 seconds)
+- Different delays for search engines vs. downloads
+- User agent rotation for each request
+
+## Error Handling
+
+The script includes comprehensive error handling for:
+- Network timeouts and connection errors
+- Invalid PDF URLs
+- Search engine rate limiting
+- File system permissions
+- Large file downloads
+
+## Best Practices
+
+1. **Respect Rate Limits**: The built-in delays help avoid IP blocking
+2. **Monitor Downloads**: Check the console output for failed downloads
+3. **Verify Content**: Review downloaded PDFs for relevance and quality
+4. **Storage Management**: Regularly clean up unnecessary files
+5. **Network Considerations**: Use on networks that allow automated downloads
+
+## Troubleshooting
+
+### Common Issues
+
+**No PDFs Found**:
+- Try different search terms
+- Check internet connectivity
+- Verify search engines are accessible
+
+**Download Failures**:
+- Some URLs may require authentication
+- Corporate firewalls may block downloads
+- Try running with different user agents
+
+**Rate Limiting**:
+- Increase delays between requests
+- Use VPN if IP is temporarily blocked
+- Run during off-peak hours
+
+### Debug Mode
+
+Add debug output by modifying the print statements or adding logging:
 
 ```python
-SEED_URLS = [
-    "https://example.com/documentation",
-    "https://vendor.com/support/manuals",
-    # ...
-]
+import logging
+logging.basicConfig(level=logging.DEBUG)
 ```
 
-### Environment Variables
+## Legal Considerations
 
-```bash
-export BING_API_KEY="your_api_key"
-export REQUESTS_PER_MIN="5"        # Lower rate limit
-export PER_DOMAIN_DELAY="15.0"     # Longer delays
-```
+- Ensure compliance with website terms of service
+- Respect copyright and intellectual property rights
+- Use downloaded materials for educational/professional purposes only
+- Be mindful of corporate policies regarding automated downloads
 
-## 📁 Project Structure
+## Contributing
 
-```
-pdf-scraper/
-├── main.py              # Main scraping logic
-├── SearchTerms.py       # Search term definitions
-├── requirements.txt     # Python dependencies
-├── README.md           # This file
-├── public_pdfs/        # Downloaded PDFs (created on first run)
-├── manifest.csv        # Activity log (created on first run)
-├── scrape.log         # Detailed logging (created on first run)
-└── .env               # Environment variables (optional)
-```
+To add new search categories or improve functionality:
 
-## 🚨 Legal Considerations
+1. Fork the repository
+2. Add new categories to `SearchTerms.py`
+3. Test thoroughly with various search terms
+4. Submit pull request with detailed description
 
-- **Review Local Laws**: Ensure compliance with your jurisdiction's copyright and computer access laws
-- **Respect Copyright**: This tool attempts to identify freely available content, but you are responsible for ensuring compliance
-- **Commercial Use**: Be especially careful about commercial use of downloaded content
-- **Terms of Service**: Some websites may have terms that restrict automated access even for public content
+## License
 
-## 🤝 Contributing
+This tool is provided as-is for educational and professional use. Users are responsible for ensuring compliance with applicable laws and terms of service.
 
-Contributions are welcome! Areas for improvement:
+## Support
 
-- Additional vendor-specific search terms
-- Better license detection algorithms
-- Support for more search engines
-- Enhanced content validation
-- Improved error handling
-
-## 📄 License
-
-This project is released under the MIT License. See LICENSE file for details.
-
-## ⚠️ Disclaimer
-
-This tool is provided for educational and professional development purposes. Users are responsible for ensuring their use complies with all applicable laws, terms of service, and ethical guidelines. The authors are not responsible for any misuse of this software.
-
-## 📞 Support
-
-- Check the logs in `scrape.log` for debugging information
-- Review the manifest CSV for detailed status of each URL
-- Ensure your Bing API key is valid if using API-based discovery
-- Verify network connectivity and firewall settings
+For issues or questions:
+- Review the troubleshooting section
+- Check that all dependencies are installed correctly
+- Ensure you have proper network permissions
+- Verify search terms are appropriate and specific
 
 ---
 
-**Happy learning!** 📚🔧
+**Note**: This tool is designed for legitimate educational and professional use by data center technicians and IT professionals. Always respect website terms of service and copyright laws.
